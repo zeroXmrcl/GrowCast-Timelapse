@@ -87,7 +87,7 @@ def create_timelapse():
 
     output_file = os.path.join(
         timelapseDir,
-        f"timelapse_{image_count:04d}.mp4"
+        "latest_timelapse.mp4"
     )
 
     input_pattern = os.path.join(snapshotDir, "%04d.webp")
