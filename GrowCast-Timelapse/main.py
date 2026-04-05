@@ -13,6 +13,7 @@ time3 = os.getenv("TIME_3")
 rtsp_url = os.getenv("RTSP_STREAM") or ""
 snapshotDir = os.getenv("SNAPSHOT_DIR_OUT") or "./snapshots"
 timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
+snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
 
 print(time1, time2, time3)
@@ -135,6 +136,11 @@ if time2:
 
 if time3:
     schedule.every().day.at(time3).do(trigger)
+
+if snapshotMinuteInterval:
+    minutes = int(snapshotMinuteInterval)
+    if minutes > 0:
+        schedule.every(minutes).minutes.do(trigger)
 
 while True:
     schedule.run_pending()
