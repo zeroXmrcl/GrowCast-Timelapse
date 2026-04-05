@@ -16,9 +16,49 @@ timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
 snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
 
-print(time1, time2, time3)
-if not rtsp_url:
-    raise ValueError("RTSP_STREAM Environment Variable not set.")
+def validate_inputs() :
+    if not rtsp_url:
+        print("RTSP_STREAM is required")
+        return False
+
+    times = [time1, time2, time3]
+    times = [t for t in times if t]
+
+    def is_valid_time(t):
+        try:
+            datetime.datetime.strptime(t, "%H:%M")
+            return True
+        except ValueError:
+            return False
+
+    for t in times:
+        if not is_valid_time(t):
+            print(f"Invalid time format: {t} (expected HH:MM)")
+            return False
+
+    interval = None
+    if snapshotMinuteInterval:
+        try:
+            interval = int(snapshotMinuteInterval)
+            if interval <= 0:
+                print("INTERVAL must be > 0")
+                return False
+        except ValueError:
+            print("INTERVAL must be an integer")
+            return False
+
+    if not times and not interval:
+        print("You must define either TIME_1, TIME_2, TIME_3 or INTERVAL")
+        return False
+
+    try:
+        if timelapseLengthSeconds <= 0:
+            print("TIMELAPSE_LENGTH_SECONDS must be > 0")
+            return False
+    except:
+        print("TIMELAPSE_LENGTH_SECONDS invalid")
+        return False
+    return True
 
 def create_filename():
     os.makedirs(snapshotDir, exist_ok=True)
@@ -127,6 +167,20 @@ def trigger():
     if success:
         create_timelapse()
 
+def welcome():
+    print("Configuration looks good!")
+    print("GrowCast Timelapse started!")
+    print("---------------------------")
+    if time1 or time2 or time3:
+        print(f"Times set: {time1} {time2} {time3}")
+    print(f"Snapshot interval: {snapshotMinuteInterval} minutes")
+    print(f"Snapshot directory: {snapshotDir}")
+    print(f"Timelapse directory: {timelapseDir}")
+
+if not validate_inputs():
+    raise ValueError("Invalid .env configuration")
+else:
+    welcome()
 
 if time1:
     schedule.every().day.at(time1).do(trigger)
