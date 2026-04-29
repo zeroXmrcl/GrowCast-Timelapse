@@ -6,6 +6,7 @@ import time
 import os
 from dotenv import load_dotenv
 
+# Import Settings
 load_dotenv()
 time1 = os.getenv("TIME_1")
 time2 = os.getenv("TIME_2")
@@ -16,12 +17,14 @@ timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
 snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
 
+# Validating User input
 def validate_inputs() :
     if not rtsp_url:
         print("RTSP_STREAM is required")
         return False
 
     times = [time1, time2, time3]
+    # Filter out falsy stuff
     times = [t for t in times if t]
 
     def is_valid_time(t):
@@ -48,7 +51,7 @@ def validate_inputs() :
             return False
 
     if not times and not interval:
-        print("You must define either TIME_1, TIME_2, TIME_3 or INTERVAL")
+        print("You must define TIME_X or INTERVAL")
         return False
 
     try:
@@ -60,6 +63,7 @@ def validate_inputs() :
         return False
     return True
 
+# Generates filename
 def create_filename():
     os.makedirs(snapshotDir, exist_ok=True)
 
@@ -73,7 +77,7 @@ def create_filename():
     next_number = max(existing, default=0) + 1
     return os.path.join(snapshotDir, f"{next_number:04d}.webp")
 
-
+# Grabs snapshot from the RTSP source
 def save_snapshot():
     print("Taking snapshot...")
     filename = create_filename()
@@ -105,7 +109,7 @@ def save_snapshot():
         print(result.stderr)
         return False
 
-
+# Renders timelapse from all NUMERIC.webp files in ./snapshots
 def create_timelapse():
     print("Creating timelapse...")
     os.makedirs(timelapseDir, exist_ok=True)
@@ -160,13 +164,14 @@ def create_timelapse():
         print(result.stderr)
         return False
 
-
+# Runs snapshot and (if successful) timelapse
 def trigger():
     print("Trigger has been executed at " + str(datetime.datetime.now()))
     success = save_snapshot()
     if success:
         create_timelapse()
 
+# Prints configuration
 def welcome():
     print("Configuration looks good!")
     print("GrowCast Timelapse started!")
@@ -182,6 +187,7 @@ if not validate_inputs():
 else:
     welcome()
 
+# Set triggers on specified times
 if time1:
     schedule.every().day.at(time1).do(trigger)
 
