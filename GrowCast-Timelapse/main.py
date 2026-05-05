@@ -3,6 +3,7 @@ import schedule
 import datetime
 import math
 import time
+import sys
 import os
 from dotenv import load_dotenv
 
@@ -204,6 +205,11 @@ if not validate_inputs():
     raise ValueError("Invalid .env configuration")
 else:
     welcome()
+
+# cli render flag
+if "--render" in sys.argv:
+    create_timelapse()
+    sys.exit(0)
 
 # Set triggers on specified times
 if time1:
