@@ -16,6 +16,7 @@ snapshotDir = os.getenv("SNAPSHOT_DIR_OUT") or "./snapshots"
 timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
 snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
+timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
 
 # Validating User input
 def validate_inputs() :
@@ -76,6 +77,17 @@ def create_filename():
 
     next_number = max(existing, default=0) + 1
     return os.path.join(snapshotDir, f"{next_number:04d}.webp")
+
+# Translate quality setting to ffmpeg CRF value
+def get_quality():
+    if timelapseQuality == "low":
+        return "28"
+    elif timelapseQuality == "medium":
+        return "23"
+    elif timelapseQuality == "high":
+        return "18"
+    else:
+        return "23"
 
 # Grabs snapshot from the RTSP source
 def save_snapshot():
@@ -143,6 +155,8 @@ def create_timelapse():
         "-framerate", str(fps),
         "-i", input_pattern,
         "-c:v", "libx264",
+        "-crf", get_quality(),
+        "-preset", "slow",
         "-pix_fmt", "yuv420p",
         output_file,
     ]
@@ -180,7 +194,11 @@ def welcome():
         print(f"Times set: {time1} {time2} {time3}")
     print(f"Snapshot interval: {snapshotMinuteInterval} minutes")
     print(f"Snapshot directory: {snapshotDir}")
+    print("---------------------------")
     print(f"Timelapse directory: {timelapseDir}")
+    print(f"Timelapse length: {timelapseLengthSeconds} seconds")
+    print(f"Timelapse quality: {timelapseQuality}")
+    print("---------------------------")
 
 if not validate_inputs():
     raise ValueError("Invalid .env configuration")
