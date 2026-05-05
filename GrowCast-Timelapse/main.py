@@ -159,6 +159,7 @@ def create_timelapse():
         "-crf", get_quality(),
         "-preset", "slow",
         "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         output_file,
     ]
 
