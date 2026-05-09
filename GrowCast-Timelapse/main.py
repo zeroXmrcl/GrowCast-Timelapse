@@ -65,6 +65,10 @@ def validate_inputs() :
         return False
     return True
 
+if "--test" in sys.argv:
+    print("input valid:", validate_inputs())
+    sys.exit(0)
+
 # Generates filename
 def create_filename():
     os.makedirs(snapshotDir, exist_ok=True)
@@ -209,6 +213,9 @@ else:
 # cli render flag
 if "--render" in sys.argv:
     create_timelapse()
+    sys.exit(0)
+if "--snapshot" in sys.argv:
+    save_snapshot()
     sys.exit(0)
 
 # Set triggers on specified times
