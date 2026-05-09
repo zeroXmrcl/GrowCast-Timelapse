@@ -126,6 +126,10 @@ def save_snapshot():
         print(result.stderr)
         return False
 
+if "--snapshot" in sys.argv:
+    save_snapshot()
+    sys.exit(0)
+
 # Renders timelapse from all NUMERIC.webp files in ./snapshots
 def create_timelapse():
     print("Creating timelapse...")
@@ -183,6 +187,10 @@ def create_timelapse():
         print(result.stderr)
         return False
 
+if "--render" in sys.argv:
+    create_timelapse()
+    sys.exit(0)
+
 # Runs snapshot and (if successful) timelapse
 def trigger():
     print("Trigger has been executed at " + str(datetime.datetime.now()))
@@ -209,14 +217,6 @@ if not validate_inputs():
     raise ValueError("Invalid .env configuration")
 else:
     welcome()
-
-# cli render flag
-if "--render" in sys.argv:
-    create_timelapse()
-    sys.exit(0)
-if "--snapshot" in sys.argv:
-    save_snapshot()
-    sys.exit(0)
 
 # Set triggers on specified times
 if time1:
