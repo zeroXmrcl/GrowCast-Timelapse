@@ -1,5 +1,6 @@
 import subprocess
 import schedule
+import requests
 import datetime
 import math
 import time
@@ -18,6 +19,47 @@ timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
 snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
 timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
+webHookURL = os.getenv("WH_URL") or ""
+
+# Sends new snapshots to Webhook
+def webhook(file_path, message="New snapshot!"):
+    if not webHookURL:
+        print("WH_URL is not set, skipping upload.")
+        return False
+
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return False
+
+    try:
+        with open(file_path, "rb") as file:
+            files = {
+                "file": (os.path.basename(file_path), file)
+            }
+
+            data = {
+                "content": message
+            }
+
+            response = requests.post(
+                webHookURL,
+                data=data,
+                files=files,
+                timeout=30
+            )
+
+        if response.status_code in [200, 204]:
+            print(f"Sent to WebHook: {file_path}")
+            return True
+        else:
+            print(f"Webhook request failed: {response.status_code}")
+            print(response.text)
+            return False
+
+    except Exception as e:
+        print("Upload error:")
+        print(e)
+        return False
 
 # Validating User input
 def validate_inputs() :
@@ -60,14 +102,25 @@ def validate_inputs() :
         if timelapseLengthSeconds <= 0:
             print("TIMELAPSE_LENGTH_SECONDS must be > 0")
             return False
-    except:
+    except ValueError:
         print("TIMELAPSE_LENGTH_SECONDS invalid")
         return False
     return True
 
-if "--test" in sys.argv:
+if "--validate" in sys.argv:
     print("input valid:", validate_inputs())
     sys.exit(0)
+
+# Translate quality setting to ffmpeg CRF value
+def get_quality():
+    if timelapseQuality == "low":
+        return "28"
+    elif timelapseQuality == "medium":
+        return "23"
+    elif timelapseQuality == "high":
+        return "18"
+    else:
+        return "23"
 
 # Generates filename
 def create_filename():
@@ -82,17 +135,6 @@ def create_filename():
 
     next_number = max(existing, default=0) + 1
     return os.path.join(snapshotDir, f"{next_number:04d}.webp")
-
-# Translate quality setting to ffmpeg CRF value
-def get_quality():
-    if timelapseQuality == "low":
-        return "28"
-    elif timelapseQuality == "medium":
-        return "23"
-    elif timelapseQuality == "high":
-        return "18"
-    else:
-        return "23"
 
 # Grabs snapshot from the RTSP source
 def save_snapshot():
@@ -120,7 +162,7 @@ def save_snapshot():
 
     if result.returncode == 0:
         print(f"File saved: {filename}")
-        return True
+        return filename
     else:
         print("ERROR: ")
         print(result.stderr)
@@ -194,9 +236,10 @@ if "--render" in sys.argv:
 
 # Runs snapshot and (if successful) timelapse
 def trigger():
-    print("Trigger has been executed at " + str(datetime.datetime.now()))
+    print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H %M')}")
     success = save_snapshot()
     if success:
+        webhook(success, datetime.datetime.now().strftime("%d - %m - %Y // %H %M"))
         create_timelapse()
 
 # Prints configuration
@@ -213,6 +256,10 @@ def welcome():
     print(f"Timelapse length: {timelapseLengthSeconds} seconds")
     print(f"Timelapse quality: {timelapseQuality}")
     print("---------------------------")
+
+if "--test" in sys.argv:
+    trigger()
+    sys.exit(0)
 
 if not validate_inputs():
     raise ValueError("Invalid .env configuration")
