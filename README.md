@@ -68,6 +68,8 @@ TIME_1=08:00
 TIME_2=12:00
 TIME_3=18:00
 INTERVAL=
+SNAPSHOT_RETRY_MAX_SECONDS=3600
+SNAPSHOT_RETRY_DELAY_SECONDS=60
 SNAPSHOT_DIR_OUT=./snapshots
 TIMELAPSE_DIR_OUT=./timelapse
 TIMELAPSE_LENGTH_SECONDS=10
@@ -117,6 +119,8 @@ Key runtime config is in `GrowCast-Timelapse/.env`:
 - `RTSP_STREAM`: camera stream URL
 - `TIME_1`, `TIME_2`, `TIME_3`: fixed daily capture times
 - `INTERVAL`: capture every N minutes
+- `SNAPSHOT_RETRY_MAX_SECONDS`: how long to keep retrying after a failed snapshot
+- `SNAPSHOT_RETRY_DELAY_SECONDS`: delay between retry attempts
 - `SNAPSHOT_DIR_OUT`: snapshot output folder
 - `TIMELAPSE_DIR_OUT`: timelapse output folder
 - `TIMELAPSE_LENGTH_SECONDS`: target duration used to calculate FPS

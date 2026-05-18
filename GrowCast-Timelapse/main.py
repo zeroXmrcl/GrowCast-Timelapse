@@ -20,6 +20,8 @@ snapshotMinuteInterval = os.getenv("INTERVAL")
 timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
 timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
 webHookURL = os.getenv("WH_URL") or ""
+retryMaxMinutes = int(os.getenv("RETRY_MAX_SECONDS", "3600"))
+retryDelaySeconds = int(os.getenv("RETRY_DELAY_SECONDS", "60"))
 
 # Sends new snapshots to Webhook
 def webhook(file_path, message="New snapshot!"):
@@ -49,7 +51,7 @@ def webhook(file_path, message="New snapshot!"):
             )
 
         if response.status_code in [200, 204]:
-            print(f"Sent to WebHook: {file_path}")
+            print(f"Webhook snapshot uploaded: {file_path}.")
             return True
         else:
             print(f"Webhook request failed: {response.status_code}")
@@ -105,6 +107,15 @@ def validate_inputs() :
     except ValueError:
         print("TIMELAPSE_LENGTH_SECONDS invalid")
         return False
+
+    if retryMaxMinutes < 0:
+        print("SNAPSHOT_RETRY_MAX_SECONDS must be >= 0")
+        return False
+
+    if retryDelaySeconds <= 0:
+        print("SNAPSHOT_RETRY_DELAY_SECONDS must be > 0")
+        return False
+
     return True
 
 if "--validate" in sys.argv:
@@ -136,8 +147,8 @@ def create_filename():
     next_number = max(existing, default=0) + 1
     return os.path.join(snapshotDir, f"{next_number:04d}.webp")
 
-# Grabs snapshot from the RTSP source
-def save_snapshot():
+# Tries to grab one snapshot from the RTSP source
+def grab_snapshot():
     print("Taking snapshot...")
     filename = create_filename()
     print(filename)
@@ -152,13 +163,21 @@ def save_snapshot():
         filename,
     ]
 
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        text=True
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            text=True
+        )
+    except subprocess.TimeoutExpired as e:
+        print("ERROR: snapshot attempt timed out")
+        if e.stderr:
+            print(e.stderr)
+        if os.path.exists(filename):
+            os.remove(filename)
+        return False
 
     if result.returncode == 0:
         print(f"File saved: {filename}")
@@ -166,7 +185,27 @@ def save_snapshot():
     else:
         print("ERROR: ")
         print(result.stderr)
+        if os.path.exists(filename):
+            os.remove(filename)
         return False
+
+# Grabs snapshot or waits if camera is not reachable
+def save_snapshot():
+    deadline = time.monotonic() + retryMaxMinutes
+
+    while True:
+        snapshot = grab_snapshot()
+        if snapshot:
+            return snapshot
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"Could not take snapshot within {retryMaxMinutes} seconds - Giving up.")
+            return False
+
+        wait_seconds = min(retryDelaySeconds, remaining)
+        print(f"Camera unavailable. Retrying in {int(wait_seconds)} seconds...")
+        time.sleep(wait_seconds)
 
 if "--snapshot" in sys.argv:
     save_snapshot()
@@ -236,10 +275,10 @@ if "--render" in sys.argv:
 
 # Runs snapshot and (if successful) timelapse
 def trigger():
-    print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H %M')}")
+    print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}")
     success = save_snapshot()
     if success:
-        webhook(success, datetime.datetime.now().strftime("%d - %m - %Y // %H %M"))
+        webhook(success, datetime.datetime.now().strftime("%d - %m - %Y // %H : %M"))
         create_timelapse()
 
 # Prints configuration
