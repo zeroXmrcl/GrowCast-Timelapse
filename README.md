@@ -64,12 +64,13 @@ cp GrowCast-Timelapse/.env.example GrowCast-Timelapse/.env
 
 ```env
 RTSP_STREAM=rtsp://username:password@camera-ip:554/stream
+TZ=UTC
 TIME_1=08:00
 TIME_2=12:00
 TIME_3=18:00
 INTERVAL=
-SNAPSHOT_RETRY_MAX_SECONDS=3600
-SNAPSHOT_RETRY_DELAY_SECONDS=60
+RETRY_MAX_SECONDS=3600
+RETRY_DELAY_SECONDS=60
 SNAPSHOT_DIR_OUT=./snapshots
 TIMELAPSE_DIR_OUT=./timelapse
 TIMELAPSE_LENGTH_SECONDS=10
@@ -77,6 +78,7 @@ TIMELAPSE_LENGTH_SECONDS=10
 
 Notes:
 - You must set `RTSP_STREAM`.
+- Set `TZ` to your local IANA timezone, such as `Europe/Berlin` or `America/New_York`.
 - Configure either `TIME_1/2/3` and/or `INTERVAL`.
 - Time format must be `HH:MM` (24-hour).
 
@@ -100,6 +102,29 @@ Same command, but run it with a process manager so it survives terminal close:
 - `launchd` (macOS)
 - Docker or your GrowCast host process manager
 
+### Docker
+
+Build and start the worker with Docker Compose:
+
+```bash
+cp GrowCast-Timelapse/.env.example GrowCast-Timelapse/.env
+docker compose up -d --build
+```
+
+The Compose service loads configuration from `GrowCast-Timelapse/.env` and mounts output folders from the host.
+Set `TZ` in `GrowCast-Timelapse/.env` so scheduled `TIME_1/2/3` values use the intended local time. If `TZ` is omitted, the container uses its default timezone, which is normally `UTC`.
+
+Scheduled times only fire while the worker is already running. If you start the container after a configured time has passed, that daily time runs on the next day. Interval captures run after the first full interval has elapsed.
+
+Useful commands:
+
+```bash
+docker compose logs -f
+docker compose run --rm growcast-timelapse python main.py --validate
+docker compose run --rm growcast-timelapse python main.py --render
+docker compose down
+```
+
 ## 5. Project Structure
 
 ```text
@@ -119,8 +144,8 @@ Key runtime config is in `GrowCast-Timelapse/.env`:
 - `RTSP_STREAM`: camera stream URL
 - `TIME_1`, `TIME_2`, `TIME_3`: fixed daily capture times
 - `INTERVAL`: capture every N minutes
-- `SNAPSHOT_RETRY_MAX_SECONDS`: how long to keep retrying after a failed snapshot
-- `SNAPSHOT_RETRY_DELAY_SECONDS`: delay between retry attempts
+- `RETRY_MAX_SECONDS`: how long to keep retrying after a failed snapshot
+- `RETRY_DELAY_SECONDS`: delay between retry attempts
 - `SNAPSHOT_DIR_OUT`: snapshot output folder
 - `TIMELAPSE_DIR_OUT`: timelapse output folder
 - `TIMELAPSE_LENGTH_SECONDS`: target duration used to calculate FPS
@@ -143,6 +168,19 @@ No HTTP API/backend service is included.
 This is a local scheduled worker script that calls `ffmpeg` via subprocess.
 
 ## 9. Deployment
+
+### Docker deployment
+
+1. Install Docker and Docker Compose.
+2. Create `GrowCast-Timelapse/.env` from `GrowCast-Timelapse/.env.example`.
+3. Set `RTSP_STREAM` and at least one schedule option.
+4. Start the service:
+
+```bash
+docker compose up -d --build
+```
+
+The container includes `ffmpeg`, so the host does not need a separate `ffmpeg` install for Docker usage.
 
 ### GrowCast extension deployment
 
