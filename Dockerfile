@@ -1,14 +1,22 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg tzdata ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=true \
+        -o Acquire::http::Pipeline-Depth=0 \
+        update; \
+    apt-get -o Acquire::Retries=5 \
+        -o Acquire::http::No-Cache=true \
+        -o Acquire::http::Pipeline-Depth=0 \
+        install -y --no-install-recommends ffmpeg tzdata ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
