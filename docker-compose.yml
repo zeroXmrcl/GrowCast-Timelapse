@@ -1,0 +1,10 @@
+services:
+  growcast-timelapse:
+    build: .
+    container_name: growcast-timelapse
+    restart: unless-stopped
+    env_file:
+      - GrowCast-Timelapse/.env
+    volumes:
+      - ./GrowCast-Timelapse/snapshots:/app/GrowCast-Timelapse/snapshots
+      - ./GrowCast-Timelapse/timelapse:/app/GrowCast-Timelapse/timelapse
