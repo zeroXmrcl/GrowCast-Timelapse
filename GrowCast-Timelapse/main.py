@@ -17,11 +17,63 @@ rtsp_url = os.getenv("RTSP_STREAM") or ""
 snapshotDir = os.getenv("SNAPSHOT_DIR_OUT") or "./snapshots"
 timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
 snapshotMinuteInterval = os.getenv("INTERVAL")
-timelapseLengthSeconds = int(os.getenv("TIMELAPSE_LENGTH_SECONDS", "10"))
+timelapseLengthSecondsRaw = os.getenv("TIMELAPSE_LENGTH_SECONDS", "10")
 timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
 webHookURL = os.getenv("WH_URL") or ""
-retryMaxMinutes = int(os.getenv("RETRY_MAX_SECONDS", "3600"))
-retryDelaySeconds = int(os.getenv("RETRY_DELAY_SECONDS", "60"))
+retryMaxSecondsRaw = os.getenv("RETRY_MAX_SECONDS", "3600")
+retryDelaySecondsRaw = os.getenv("RETRY_DELAY_SECONDS", "60")
+
+timelapseLengthSeconds = 10
+retryMaxSeconds = 3600
+retryDelaySeconds = 60
+
+
+def parse_int_setting(name, value, *, minimum=None, exclusive_minimum=False):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        print(f"{name} must be an integer")
+        return None
+
+    if minimum is not None:
+        if exclusive_minimum and parsed <= minimum:
+            print(f"{name} must be > {minimum}")
+            return None
+        if not exclusive_minimum and parsed < minimum:
+            print(f"{name} must be >= {minimum}")
+            return None
+
+    return parsed
+
+
+def parse_numeric_settings():
+    global timelapseLengthSeconds, retryMaxSeconds, retryDelaySeconds
+
+    parsed_timelapse_length = parse_int_setting(
+        "TIMELAPSE_LENGTH_SECONDS",
+        timelapseLengthSecondsRaw,
+        minimum=0,
+        exclusive_minimum=True,
+    )
+    parsed_retry_max = parse_int_setting(
+        "RETRY_MAX_SECONDS",
+        retryMaxSecondsRaw,
+        minimum=0,
+    )
+    parsed_retry_delay = parse_int_setting(
+        "RETRY_DELAY_SECONDS",
+        retryDelaySecondsRaw,
+        minimum=0,
+        exclusive_minimum=True,
+    )
+
+    if any(value is None for value in (parsed_timelapse_length, parsed_retry_max, parsed_retry_delay)):
+        return False
+
+    timelapseLengthSeconds = parsed_timelapse_length
+    retryMaxSeconds = parsed_retry_max
+    retryDelaySeconds = parsed_retry_delay
+    return True
 
 # Sends new snapshots to Webhook
 def webhook(file_path, message="New snapshot!"):
@@ -100,20 +152,7 @@ def validate_inputs() :
         print("You must define TIME_X or INTERVAL")
         return False
 
-    try:
-        if timelapseLengthSeconds <= 0:
-            print("TIMELAPSE_LENGTH_SECONDS must be > 0")
-            return False
-    except ValueError:
-        print("TIMELAPSE_LENGTH_SECONDS invalid")
-        return False
-
-    if retryMaxMinutes < 0:
-        print("SNAPSHOT_RETRY_MAX_SECONDS must be >= 0")
-        return False
-
-    if retryDelaySeconds <= 0:
-        print("SNAPSHOT_RETRY_DELAY_SECONDS must be > 0")
+    if not parse_numeric_settings():
         return False
 
     return True
@@ -191,7 +230,7 @@ def grab_snapshot():
 
 # Grabs snapshot or waits if camera is not reachable
 def save_snapshot():
-    deadline = time.monotonic() + retryMaxMinutes
+    deadline = time.monotonic() + retryMaxSeconds
 
     while True:
         snapshot = grab_snapshot()
@@ -200,7 +239,7 @@ def save_snapshot():
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            print(f"Could not take snapshot within {retryMaxMinutes} seconds - Giving up.")
+            print(f"Could not take snapshot within {retryMaxSeconds} seconds - Giving up.")
             return False
 
         wait_seconds = min(retryDelaySeconds, remaining)
@@ -208,6 +247,11 @@ def save_snapshot():
         time.sleep(wait_seconds)
 
 if "--snapshot" in sys.argv:
+    if not parse_numeric_settings():
+        sys.exit(1)
+    if not rtsp_url:
+        print("RTSP_STREAM is required")
+        sys.exit(1)
     save_snapshot()
     sys.exit(0)
 
@@ -270,6 +314,8 @@ def create_timelapse():
         return False
 
 if "--render" in sys.argv:
+    if not parse_numeric_settings():
+        sys.exit(1)
     create_timelapse()
     sys.exit(0)
 
@@ -297,6 +343,8 @@ def welcome():
     print("---------------------------")
 
 if "--test" in sys.argv:
+    if not validate_inputs():
+        raise ValueError("Invalid .env configuration")
     trigger()
     sys.exit(0)
 
