@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 # Import Settings
 load_dotenv()
+apiURL = os.getenv("API_URL")
+apiToken = os.getenv("API_TOKEN")
 time1 = os.getenv("TIME_1")
 time2 = os.getenv("TIME_2")
 time3 = os.getenv("TIME_3")
