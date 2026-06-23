@@ -37,6 +37,7 @@ retryDelaySeconds = 60
 api_sync_enabled = bool(apiURL and apiToken)
 paused = False
 deferred_trigger_pending = False
+catchup_on_next_tick = False
 last_settings_version = None
 
 
@@ -174,19 +175,50 @@ def update_env_file(updates):
     ENV_PATH.write_text("".join(new_lines), encoding="utf-8")
 
 
-def reload_runtime_settings():
+def snapshot_runtime_settings():
+    return {
+        "time1": time1,
+        "time2": time2,
+        "time3": time3,
+        "snapshotMinuteInterval": snapshotMinuteInterval,
+        "timelapseLengthSecondsRaw": timelapseLengthSecondsRaw,
+        "timelapseQuality": timelapseQuality,
+        "timelapseLengthSeconds": timelapseLengthSeconds,
+        "retryMaxSeconds": retryMaxSeconds,
+        "retryDelaySeconds": retryDelaySeconds,
+        "paused": paused,
+    }
+
+
+def restore_runtime_settings(previous):
+    global time1, time2, time3, snapshotMinuteInterval
+    global timelapseLengthSecondsRaw, timelapseQuality
+    global timelapseLengthSeconds, retryMaxSeconds, retryDelaySeconds, paused
+
+    time1 = previous["time1"]
+    time2 = previous["time2"]
+    time3 = previous["time3"]
+    snapshotMinuteInterval = previous["snapshotMinuteInterval"]
+    timelapseLengthSecondsRaw = previous["timelapseLengthSecondsRaw"]
+    timelapseQuality = previous["timelapseQuality"]
+    timelapseLengthSeconds = previous["timelapseLengthSeconds"]
+    retryMaxSeconds = previous["retryMaxSeconds"]
+    retryDelaySeconds = previous["retryDelaySeconds"]
+    paused = previous["paused"]
+
+
+def apply_env_values_to_runtime(env_values):
     global time1, time2, time3, snapshotMinuteInterval
     global timelapseLengthSecondsRaw, timelapseQuality
 
-    load_dotenv(ENV_PATH, override=True)
-    time1 = os.getenv("TIME_1")
-    time2 = os.getenv("TIME_2")
-    time3 = os.getenv("TIME_3")
-    snapshotMinuteInterval = os.getenv("INTERVAL")
-    timelapseLengthSecondsRaw = os.getenv("TIMELAPSE_LENGTH_SECONDS", "10")
-    timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
+    time1 = env_values.get("TIME_1", "")
+    time2 = env_values.get("TIME_2", "")
+    time3 = env_values.get("TIME_3", "")
+    snapshotMinuteInterval = env_values.get("INTERVAL", "")
+    timelapseLengthSecondsRaw = env_values.get("TIMELAPSE_LENGTH_SECONDS", "10")
+    timelapseQuality = env_values.get("TIMELAPSE_QUALITY", "medium")
 
-    tz = os.getenv("TZ")
+    tz = env_values.get("TZ")
     if tz:
         os.environ["TZ"] = tz
         if hasattr(time, "tzset"):
@@ -197,17 +229,23 @@ def reload_runtime_settings():
 
 def fetch_mesh_settings():
     base_url = apiURL.rstrip("/")
-    url = f"{base_url}/api/mesh/{PLUGIN_ID}/"
+    url = f"{base_url}/api/mesh/{PLUGIN_ID}"
     log_api(f"Fetching settings from {url}")
 
     response = requests.get(
         url,
         headers={"Authorization": f"Bearer {apiToken}"},
         timeout=30,
-        allow_redirects=True,
+        allow_redirects=False,
     )
     response.raise_for_status()
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        preview = (response.text or "")[:200]
+        raise ValueError(
+            f"API returned non-JSON response (status={response.status_code}): {preview!r}"
+        ) from None
     log_api(
         f"Fetched settings (version={payload.get('settingsVersion')}, "
         f"paused={payload.get('settings', {}).get('paused')})"
@@ -224,14 +262,16 @@ def apply_api_settings(settings, settings_version):
         return False
 
     was_paused = paused
-    paused = bool(settings.get("paused", False))
+    previous = snapshot_runtime_settings()
+    new_paused = bool(settings.get("paused", False))
 
-    update_env_file(env_values)
-    if not reload_runtime_settings():
+    if not apply_env_values_to_runtime(env_values):
         log_api("Rejected API settings: failed to apply numeric settings")
-        paused = was_paused
+        restore_runtime_settings(previous)
         return False
 
+    paused = new_paused
+    update_env_file(env_values)
     last_settings_version = settings_version
     log_api(
         f"Applied settings to .env (version={settings_version}, paused={paused}, "
@@ -250,10 +290,18 @@ def apply_api_settings(settings, settings_version):
 
 
 def handle_pause_disabled():
-    global deferred_trigger_pending
+    global catchup_on_next_tick
 
     if deferred_trigger_pending:
-        log_api("Pause disabled with deferred trigger pending - running one catch-up snapshot")
+        log_api("Pause disabled with deferred trigger pending - catch-up scheduled for next tick")
+        catchup_on_next_tick = True
+
+
+def run_pending_catchup():
+    global catchup_on_next_tick
+
+    if catchup_on_next_tick:
+        catchup_on_next_tick = False
         trigger(force=True)
 
 
@@ -589,15 +637,16 @@ if "--test" in sys.argv:
     trigger()
     sys.exit(0)
 
-if not validate_inputs():
-    raise ValueError("Invalid .env configuration")
-
 if api_sync_enabled:
     sync_from_api()
+
+if not validate_inputs():
+    raise ValueError("Invalid .env configuration")
 
 welcome()
 reschedule_jobs()
 
 while True:
     schedule.run_pending()
+    run_pending_catchup()
     time.sleep(1)
