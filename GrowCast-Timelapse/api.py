@@ -1,6 +1,5 @@
 import datetime
 import os
-import time
 from enum import Enum
 from pathlib import Path
 
@@ -19,37 +18,14 @@ class SyncResult(Enum):
 class PauseGate:
     def __init__(self):
         self.paused = False
-        self.missed_while_paused = False
-        self.catchup_pending = False
-        self.pause_activated_at = None
-        self.pause_activated_monotonic = None
 
-    def should_run_trigger(self, force=False):
-        if self.paused and not force:
-            self.missed_while_paused = True
+    def should_run_trigger(self):
+        if self.paused:
             return False
-        self.missed_while_paused = False
         return True
 
     def set_paused(self, new_paused):
-        was_paused = self.paused
         self.paused = new_paused
-        if new_paused and not was_paused:
-            self.pause_activated_at = datetime.datetime.now()
-            self.pause_activated_monotonic = time.monotonic()
-        if not new_paused:
-            self.pause_activated_at = None
-            self.pause_activated_monotonic = None
-        if was_paused and not new_paused and self.missed_while_paused:
-            self.missed_while_paused = False
-            self.catchup_pending = True
-            return True
-        return False
-
-    def run_pending_catchup(self, trigger_fn):
-        if self.catchup_pending:
-            self.catchup_pending = False
-            trigger_fn(force=True)
 
 
 def log_api(message):
@@ -264,8 +240,7 @@ class SettingsSync:
         settings = payload.get("settings", {})
         new_paused = bool(settings.get("paused", False))
 
-        if self.pause_gate.set_paused(new_paused):
-            log_api("Pause disabled with deferred trigger pending - catch-up scheduled for next tick")
+        self.pause_gate.set_paused(new_paused)
 
         if not self.settings_changed(settings, settings_version):
             return SyncResult.NO_CHANGE
