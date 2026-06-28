@@ -3,6 +3,8 @@ services:
     build: .
     container_name: growcast-timelapse
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - GrowCast-Timelapse/.env
     volumes:

@@ -9,14 +9,20 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+from api import (
+    SYNC_INTERVAL_MINUTES,
+    PauseGate,
+    SettingsSync,
+    parse_int_setting,
+    validate_env_values,
+)
+
 ENV_PATH = Path(__file__).resolve().parent / ".env"
-PLUGIN_ID = "growcast.timelapse"
-SYNC_INTERVAL_MINUTES = 10
 
 # Import Settings
 load_dotenv(ENV_PATH)
-apiURL = os.getenv("API_URL")
-apiToken = os.getenv("API_TOKEN")
+API_URL = os.getenv("API_URL")
+API_TOKEN = os.getenv("API_TOKEN")
 time1 = os.getenv("TIME_1")
 time2 = os.getenv("TIME_2")
 time3 = os.getenv("TIME_3")
@@ -34,34 +40,32 @@ timelapseLengthSeconds = 10
 retryMaxSeconds = 3600
 retryDelaySeconds = 60
 
-api_sync_enabled = bool(apiURL and apiToken)
-paused = False
-deferred_trigger_pending = False
-catchup_on_next_tick = False
-last_settings_version = None
+pause_gate = PauseGate()
 
 
-def log_api(message):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[API {timestamp}] {message}")
+def build_env_from_globals():
+    return {
+        "TZ": os.getenv("TZ", "UTC"),
+        "TIME_1": time1 or "",
+        "TIME_2": time2 or "",
+        "TIME_3": time3 or "",
+        "INTERVAL": snapshotMinuteInterval or "",
+        "TIMELAPSE_LENGTH_SECONDS": timelapseLengthSecondsRaw,
+        "TIMELAPSE_QUALITY": timelapseQuality,
+        "RETRY_MAX_SECONDS": retryMaxSecondsRaw,
+        "RETRY_DELAY_SECONDS": retryDelaySecondsRaw,
+    }
 
 
-def parse_int_setting(name, value, *, minimum=None, exclusive_minimum=False):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        print(f"{name} must be an integer")
-        return None
-
-    if minimum is not None:
-        if exclusive_minimum and parsed <= minimum:
-            print(f"{name} must be > {minimum}")
-            return None
-        if not exclusive_minimum and parsed < minimum:
-            print(f"{name} must be >= {minimum}")
-            return None
-
-    return parsed
+def runtime_snapshot():
+    return {
+        "TIME_1": time1,
+        "TIME_2": time2,
+        "TIME_3": time3,
+        "INTERVAL": snapshotMinuteInterval,
+        "TIMELAPSE_LENGTH_SECONDS": timelapseLengthSeconds,
+        "TIMELAPSE_QUALITY": timelapseQuality,
+    }
 
 
 def parse_numeric_settings():
@@ -94,119 +98,6 @@ def parse_numeric_settings():
     return True
 
 
-def api_settings_to_env_values(settings):
-    interval = settings.get("intervalMinutes")
-    return {
-        "TZ": settings.get("timezone") or "UTC",
-        "TIME_1": settings.get("time1") or "",
-        "TIME_2": settings.get("time2") or "",
-        "TIME_3": settings.get("time3") or "",
-        "INTERVAL": "" if interval is None else str(interval),
-        "TIMELAPSE_LENGTH_SECONDS": str(settings.get("timelapseLengthSeconds", 10)),
-        "TIMELAPSE_QUALITY": settings.get("timelapseQuality") or "medium",
-    }
-
-
-def validate_env_values(env_values):
-    times = [env_values.get("TIME_1"), env_values.get("TIME_2"), env_values.get("TIME_3")]
-    times = [t for t in times if t]
-
-    for t in times:
-        try:
-            datetime.datetime.strptime(t, "%H:%M")
-        except ValueError:
-            print(f"Invalid time format: {t} (expected HH:MM)")
-            return False
-
-    interval_raw = env_values.get("INTERVAL", "")
-    if interval_raw:
-        try:
-            interval = int(interval_raw)
-            if interval <= 0:
-                print("INTERVAL must be > 0")
-                return False
-        except ValueError:
-            print("INTERVAL must be an integer")
-            return False
-
-    if not times and not interval_raw:
-        print("You must define TIME_X or INTERVAL")
-        return False
-
-    quality = env_values.get("TIMELAPSE_QUALITY", "medium")
-    if quality not in ("low", "medium", "high"):
-        print(f"Invalid TIMELAPSE_QUALITY: {quality}")
-        return False
-
-    parsed_timelapse_length = parse_int_setting(
-        "TIMELAPSE_LENGTH_SECONDS",
-        env_values.get("TIMELAPSE_LENGTH_SECONDS", "10"),
-        minimum=0,
-        exclusive_minimum=True,
-    )
-    return parsed_timelapse_length is not None
-
-
-def update_env_file(updates):
-    lines = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
-
-    updated_keys = set()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            new_lines.append(line if line.endswith("\n") else line + "\n")
-            continue
-        if "=" in stripped:
-            key, _, _ = stripped.partition("=")
-            key = key.strip()
-            if key in updates:
-                new_lines.append(f"{key}={updates[key]}\n")
-                updated_keys.add(key)
-                continue
-        new_lines.append(line if line.endswith("\n") else line + "\n")
-
-    for key, value in updates.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={value}\n")
-
-    ENV_PATH.write_text("".join(new_lines), encoding="utf-8")
-
-
-def snapshot_runtime_settings():
-    return {
-        "time1": time1,
-        "time2": time2,
-        "time3": time3,
-        "snapshotMinuteInterval": snapshotMinuteInterval,
-        "timelapseLengthSecondsRaw": timelapseLengthSecondsRaw,
-        "timelapseQuality": timelapseQuality,
-        "timelapseLengthSeconds": timelapseLengthSeconds,
-        "retryMaxSeconds": retryMaxSeconds,
-        "retryDelaySeconds": retryDelaySeconds,
-        "paused": paused,
-    }
-
-
-def restore_runtime_settings(previous):
-    global time1, time2, time3, snapshotMinuteInterval
-    global timelapseLengthSecondsRaw, timelapseQuality
-    global timelapseLengthSeconds, retryMaxSeconds, retryDelaySeconds, paused
-
-    time1 = previous["time1"]
-    time2 = previous["time2"]
-    time3 = previous["time3"]
-    snapshotMinuteInterval = previous["snapshotMinuteInterval"]
-    timelapseLengthSecondsRaw = previous["timelapseLengthSecondsRaw"]
-    timelapseQuality = previous["timelapseQuality"]
-    timelapseLengthSeconds = previous["timelapseLengthSeconds"]
-    retryMaxSeconds = previous["retryMaxSeconds"]
-    retryDelaySeconds = previous["retryDelaySeconds"]
-    paused = previous["paused"]
-
-
 def apply_env_values_to_runtime(env_values):
     global time1, time2, time3, snapshotMinuteInterval
     global timelapseLengthSecondsRaw, timelapseQuality
@@ -227,107 +118,6 @@ def apply_env_values_to_runtime(env_values):
     return parse_numeric_settings()
 
 
-def fetch_mesh_settings():
-    base_url = apiURL.rstrip("/")
-    url = f"{base_url}/api/mesh/{PLUGIN_ID}"
-    log_api(f"Fetching settings from {url}")
-
-    response = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {apiToken}"},
-        timeout=30,
-        allow_redirects=False,
-    )
-    response.raise_for_status()
-    try:
-        payload = response.json()
-    except ValueError:
-        preview = (response.text or "")[:200]
-        raise ValueError(
-            f"API returned non-JSON response (status={response.status_code}): {preview!r}"
-        ) from None
-    log_api(
-        f"Fetched settings (version={payload.get('settingsVersion')}, "
-        f"paused={payload.get('settings', {}).get('paused')})"
-    )
-    return payload
-
-
-def apply_api_settings(settings, settings_version):
-    global paused, last_settings_version
-
-    env_values = api_settings_to_env_values(settings)
-    if not validate_env_values(env_values):
-        log_api("Rejected API settings: validation failed")
-        return False
-
-    was_paused = paused
-    previous = snapshot_runtime_settings()
-    new_paused = bool(settings.get("paused", False))
-
-    if not apply_env_values_to_runtime(env_values):
-        log_api("Rejected API settings: failed to apply numeric settings")
-        restore_runtime_settings(previous)
-        return False
-
-    paused = new_paused
-    update_env_file(env_values)
-    last_settings_version = settings_version
-    log_api(
-        f"Applied settings to .env (version={settings_version}, paused={paused}, "
-        f"TIME_1={time1 or '-'}, TIME_2={time2 or '-'}, TIME_3={time3 or '-'}, "
-        f"INTERVAL={snapshotMinuteInterval or '-'}, "
-        f"TIMELAPSE_LENGTH_SECONDS={timelapseLengthSeconds}, "
-        f"TIMELAPSE_QUALITY={timelapseQuality})"
-    )
-
-    reschedule_jobs()
-
-    if was_paused and not paused:
-        handle_pause_disabled()
-
-    return True
-
-
-def handle_pause_disabled():
-    global catchup_on_next_tick
-
-    if deferred_trigger_pending:
-        log_api("Pause disabled with deferred trigger pending - catch-up scheduled for next tick")
-        catchup_on_next_tick = True
-
-
-def run_pending_catchup():
-    global catchup_on_next_tick
-
-    if catchup_on_next_tick:
-        catchup_on_next_tick = False
-        trigger(force=True)
-
-
-def sync_from_api():
-    global last_settings_version, paused
-
-    try:
-        payload = fetch_mesh_settings()
-    except Exception as e:
-        log_api(f"Failed to fetch settings: {e}")
-        return False
-
-    settings_version = payload.get("settingsVersion")
-    settings = payload.get("settings", {})
-    new_paused = bool(settings.get("paused", False))
-
-    if last_settings_version is not None and settings_version == last_settings_version:
-        was_paused = paused
-        paused = new_paused
-        if was_paused and not paused:
-            handle_pause_disabled()
-        return False
-
-    return apply_api_settings(settings, settings_version)
-
-
 def reschedule_jobs():
     schedule.clear()
 
@@ -342,8 +132,22 @@ def reschedule_jobs():
         if minutes > 0:
             schedule.every(minutes).minutes.do(trigger)
 
-    if api_sync_enabled:
+    if settings_sync.enabled:
         schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(sync_from_api)
+
+
+settings_sync = SettingsSync(
+    ENV_PATH,
+    API_URL,
+    API_TOKEN,
+    pause_gate,
+    apply_env_values_to_runtime,
+    reschedule_jobs,
+)
+
+
+def sync_from_api():
+    settings_sync.sync(runtime_snapshot)
 
 
 # Sends new snapshots to Webhook
@@ -386,47 +190,17 @@ def webhook(file_path, message="New snapshot!"):
         print(e)
         return False
 
-# Validating User input
-def validate_inputs() :
+
+def validate_inputs():
     if not rtsp_url:
         print("RTSP_STREAM is required")
         return False
 
-    times = [time1, time2, time3]
-    # Filter out falsy stuff
-    times = [t for t in times if t]
-
-    def is_valid_time(t):
-        try:
-            datetime.datetime.strptime(t, "%H:%M")
-            return True
-        except ValueError:
-            return False
-
-    for t in times:
-        if not is_valid_time(t):
-            print(f"Invalid time format: {t} (expected HH:MM)")
-            return False
-
-    interval = None
-    if snapshotMinuteInterval:
-        try:
-            interval = int(snapshotMinuteInterval)
-            if interval <= 0:
-                print("INTERVAL must be > 0")
-                return False
-        except ValueError:
-            print("INTERVAL must be an integer")
-            return False
-
-    if not times and not interval:
-        print("You must define TIME_X or INTERVAL")
+    if not validate_env_values(build_env_from_globals()):
         return False
 
-    if not parse_numeric_settings():
-        return False
+    return parse_numeric_settings()
 
-    return True
 
 if "--validate" in sys.argv:
     print("input valid:", validate_inputs())
@@ -592,10 +366,7 @@ if "--render" in sys.argv:
 
 # Runs snapshot and (if successful) timelapse
 def trigger(force=False):
-    global deferred_trigger_pending
-
-    if paused and not force:
-        deferred_trigger_pending = True
+    if not pause_gate.should_run_trigger(force=force):
         print(
             f"Paused - skipping snapshot at "
             f"{datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')} "
@@ -603,7 +374,6 @@ def trigger(force=False):
         )
         return
 
-    deferred_trigger_pending = False
     print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}")
     success = save_snapshot()
     if success:
@@ -624,9 +394,9 @@ def welcome():
     print(f"Timelapse length: {timelapseLengthSeconds} seconds")
     print(f"Timelapse quality: {timelapseQuality}")
     print("---------------------------")
-    if api_sync_enabled:
-        print(f"API sync: enabled ({apiURL}, every {SYNC_INTERVAL_MINUTES} min)")
-        print(f"Paused: {paused}")
+    if settings_sync.enabled:
+        print(f"API sync: enabled ({API_URL}, every {SYNC_INTERVAL_MINUTES} min)")
+        print(f"Paused: {pause_gate.paused}")
     else:
         print("API sync: disabled")
     print("---------------------------")
@@ -637,7 +407,7 @@ if "--test" in sys.argv:
     trigger()
     sys.exit(0)
 
-if api_sync_enabled:
+if settings_sync.enabled:
     sync_from_api()
 
 if not validate_inputs():
@@ -648,5 +418,5 @@ reschedule_jobs()
 
 while True:
     schedule.run_pending()
-    run_pending_catchup()
+    pause_gate.run_pending_catchup(trigger)
     time.sleep(1)
