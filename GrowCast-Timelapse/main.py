@@ -42,6 +42,38 @@ retryDelaySeconds = 60
 
 pause_gate = PauseGate()
 
+last_trigger_time = time.monotonic()
+
+
+def _update_last_trigger_time():
+    global last_trigger_time
+    last_trigger_time = time.monotonic()
+
+
+def _mark_missed_triggers_while_paused():
+
+    if not pause_gate.paused:
+        return
+
+    now_hm = datetime.datetime.now().strftime("%H:%M")
+
+    # Fixed time slots (TIME_1 / TIME_2 / TIME_3)
+    for t in (time1, time2, time3):
+        if t and t <= now_hm:
+            pause_gate.missed_while_paused = True
+            return
+
+    # INTERVAL-based: if enough minutes have elapsed since last actual trigger
+    if snapshotMinuteInterval:
+        try:
+            mins = int(snapshotMinuteInterval)
+            if mins > 0:
+                elapsed = time.monotonic() - last_trigger_time
+                if elapsed >= (mins * 60):
+                    pause_gate.missed_while_paused = True
+        except (ValueError, TypeError):
+            pass
+
 
 def build_env_from_globals():
     return {
@@ -134,6 +166,9 @@ def reschedule_jobs():
 
     if settings_sync.enabled:
         schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(sync_from_api)
+
+    if pause_gate.paused:
+        _mark_missed_triggers_while_paused()
 
 
 settings_sync = SettingsSync(
@@ -375,6 +410,7 @@ def trigger(force=False):
         return
 
     print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}")
+    _update_last_trigger_time()
     success = save_snapshot()
     if success:
         webhook(success, datetime.datetime.now().strftime("%d - %m - %Y // %H : %M"))
@@ -387,7 +423,10 @@ def welcome():
     print("---------------------------")
     if time1 or time2 or time3:
         print(f"Times set: {time1} {time2} {time3}")
-    print(f"Snapshot interval: {snapshotMinuteInterval} minutes")
+    if snapshotMinuteInterval and str(snapshotMinuteInterval).strip() not in ("", "-"):
+        print(f"Snapshot interval: {snapshotMinuteInterval} minutes")
+    else:
+        print("Snapshot interval: (using fixed TIME_* only)")
     print(f"Snapshot directory: {snapshotDir}")
     print("---------------------------")
     print(f"Timelapse directory: {timelapseDir}")
@@ -409,6 +448,8 @@ if "--test" in sys.argv:
 
 if settings_sync.enabled:
     sync_from_api()
+    if pause_gate.paused:
+        _mark_missed_triggers_while_paused()
 
 if not validate_inputs():
     raise ValueError("Invalid .env configuration")
@@ -416,7 +457,12 @@ if not validate_inputs():
 welcome()
 reschedule_jobs()
 
+if pause_gate.paused:
+    _mark_missed_triggers_while_paused()
+
 while True:
     schedule.run_pending()
     pause_gate.run_pending_catchup(trigger)
+    if pause_gate.paused:
+        _mark_missed_triggers_while_paused()
     time.sleep(1)

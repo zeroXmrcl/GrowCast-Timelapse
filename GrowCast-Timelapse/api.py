@@ -21,6 +21,8 @@ class PauseGate:
         self.paused = False
         self.missed_while_paused = False
         self.catchup_pending = False
+        self.pause_activated_at = None
+        self.pause_activated_monotonic = None
 
     def should_run_trigger(self, force=False):
         if self.paused and not force:
@@ -32,6 +34,12 @@ class PauseGate:
     def set_paused(self, new_paused):
         was_paused = self.paused
         self.paused = new_paused
+        if new_paused and not was_paused:
+            self.pause_activated_at = datetime.datetime.now()
+            self.pause_activated_monotonic = time.monotonic()
+        if not new_paused:
+            self.pause_activated_at = None
+            self.pause_activated_monotonic = None
         if was_paused and not new_paused and self.missed_while_paused:
             self.missed_while_paused = False
             self.catchup_pending = True
