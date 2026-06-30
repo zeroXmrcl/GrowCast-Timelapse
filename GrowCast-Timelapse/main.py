@@ -6,6 +6,8 @@ import math
 import time
 import sys
 import os
+import atexit
+import signal
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -41,6 +43,84 @@ retryMaxSeconds = 3600
 retryDelaySeconds = 60
 
 pause_gate = PauseGate()
+
+
+# lockfile
+LOCK_PATH = None
+
+
+def _get_lock_path():
+    global LOCK_PATH
+    if LOCK_PATH is not None:
+        return LOCK_PATH
+    env_lock = os.getenv("LOCK_FILE")
+    if env_lock:
+        LOCK_PATH = Path(env_lock).resolve()
+    else:
+        LOCK_PATH = (Path(snapshotDir).resolve() / ".timelapse.lock")
+    return LOCK_PATH
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_instance_lock():
+    lock = _get_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+
+    if lock.exists():
+        try:
+            content = lock.read_text(encoding="utf-8").strip().splitlines()
+            old_pid = int(content[0]) if content and content[0].strip().isdigit() else 0
+        except Exception:
+            old_pid = 0
+
+        if old_pid and _is_pid_running(old_pid):
+            print(f"ERROR: Another instance is already running (PID {old_pid}).")
+            print(f"Lock file: {lock}")
+            print("If the old instance crashed, delete the lockfile manually,")
+            print("or start with SKIP_LOCK=1 (not recommended for normal use).")
+            sys.exit(1)
+        else:
+            print(f"Removing stale lock file (previous PID was {old_pid})")
+            try:
+                lock.unlink()
+            except Exception:
+                pass
+
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    print(f"[lock] Acquired lock {lock} (PID {os.getpid()})")
+
+    atexit.register(release_instance_lock)
+
+    def _handle_signal(signum, _frame):
+        print(f"[lock] Received signal {signum}, releasing lock and exiting...")
+        release_instance_lock()
+        sys.exit(128 + signum if signum < 128 else 1)
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        try:
+            sig = getattr(signal, sig_name)
+            signal.signal(sig, _handle_signal)
+        except (AttributeError, ValueError):
+            pass
+
+
+def release_instance_lock():
+    lock = _get_lock_path()
+    try:
+        if lock.exists():
+            lock.unlink()
+            print(f"[lock] Released {lock}")
+    except Exception as e:
+        print(f"[lock] Warning: could not remove lockfile: {e}")
 
 
 def build_env_from_globals():
@@ -205,6 +285,10 @@ def validate_inputs():
 if "--validate" in sys.argv:
     print("input valid:", validate_inputs())
     sys.exit(0)
+
+# Acquire lockfile so only one instance of the script can run at a time.
+if os.getenv("SKIP_LOCK", "0").lower() not in ("1", "true", "yes"):
+    acquire_instance_lock()
 
 # Translate quality setting to ffmpeg CRF value
 def get_quality():

@@ -1,2 +1,6 @@
 .env
 .env
+**/.growcast-timelapse.lock
+*.lock
+snapshots/*.lock
+timelapse/*.lock
