@@ -1,6 +1,7 @@
 .env
-.env
-**/.growcast-timelapse.lock
-*.lock
-snapshots/*.lock
-timelapse/*.lock
+**/.timelapse.lock
+snapshots/.timelapse.lock
+
+__pycache__/
+*.pyc
+

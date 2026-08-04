@@ -1,238 +1,58 @@
-import subprocess
-import schedule
-import requests
+from __future__ import annotations
+
 import datetime
 import math
-import time
-import sys
 import os
-import atexit
-import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+import requests
+import schedule
 from dotenv import load_dotenv
 
-from api import (
-    SYNC_INTERVAL_MINUTES,
-    PauseGate,
-    SettingsSync,
-    parse_int_setting,
-    validate_env_values,
+from api import SYNC_INTERVAL_MINUTES, SettingsSync
+from config import (
+    RuntimeState,
+    config_validation_errors,
+    load_config_from_environ,
+    should_run_trigger,
+)
+from instance_lock import (
+    LockHeldError,
+    acquire_instance_lock,
+    release_instance_lock,
+    resolve_lock_path,
 )
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 
-# Import Settings
-load_dotenv(ENV_PATH)
-API_URL = os.getenv("API_URL")
-API_TOKEN = os.getenv("API_TOKEN")
-time1 = os.getenv("TIME_1")
-time2 = os.getenv("TIME_2")
-time3 = os.getenv("TIME_3")
-rtsp_url = os.getenv("RTSP_STREAM") or ""
-snapshotDir = os.getenv("SNAPSHOT_DIR_OUT") or "./snapshots"
-timelapseDir = os.getenv("TIMELAPSE_DIR_OUT") or "./timelapse"
-snapshotMinuteInterval = os.getenv("INTERVAL")
-timelapseLengthSecondsRaw = os.getenv("TIMELAPSE_LENGTH_SECONDS", "10")
-timelapseQuality = os.getenv("TIMELAPSE_QUALITY", "medium")
-webHookURL = os.getenv("WH_URL") or ""
-retryMaxSecondsRaw = os.getenv("RETRY_MAX_SECONDS", "3600")
-retryDelaySecondsRaw = os.getenv("RETRY_DELAY_SECONDS", "60")
+def detect_mode(argv: list[str]) -> str:
+    if "--validate" in argv:
+        return "validate"
+    if "--snapshot" in argv:
+        return "snapshot"
+    if "--render" in argv:
+        return "render"
+    if "--test" in argv:
+        return "test"
+    return "daemon"
 
-timelapseLengthSeconds = 10
-retryMaxSeconds = 3600
-retryDelaySeconds = 60
+def list_numeric_webps(directory: str) -> list[str]:
+    names: list[str] = []
+    if not os.path.isdir(directory):
+        return names
+    for name in os.listdir(directory):
+        if name.lower().endswith(".webp"):
+            base = os.path.splitext(name)[0]
+            if base.isdigit():
+                names.append(name)
+    names.sort()
+    return names
 
-pause_gate = PauseGate()
-
-
-# lockfile
-LOCK_PATH = None
-
-
-def _get_lock_path():
-    global LOCK_PATH
-    if LOCK_PATH is not None:
-        return LOCK_PATH
-    env_lock = os.getenv("LOCK_FILE")
-    if env_lock:
-        LOCK_PATH = Path(env_lock).resolve()
-    else:
-        LOCK_PATH = (Path(snapshotDir).resolve() / ".timelapse.lock")
-    return LOCK_PATH
-
-
-def _is_pid_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def acquire_instance_lock():
-    lock = _get_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
-
-    if lock.exists():
-        try:
-            content = lock.read_text(encoding="utf-8").strip().splitlines()
-            old_pid = int(content[0]) if content and content[0].strip().isdigit() else 0
-        except Exception:
-            old_pid = 0
-
-        if old_pid and _is_pid_running(old_pid):
-            print(f"ERROR: Another instance is already running (PID {old_pid}).")
-            print(f"Lock file: {lock}")
-            print("If the old instance crashed, delete the lockfile manually,")
-            print("or start with SKIP_LOCK=1 (not recommended for normal use).")
-            sys.exit(1)
-        else:
-            print(f"Removing stale lock file (previous PID was {old_pid})")
-            try:
-                lock.unlink()
-            except Exception:
-                pass
-
-    lock.write_text(str(os.getpid()), encoding="utf-8")
-    print(f"[lock] Acquired lock {lock} (PID {os.getpid()})")
-
-    atexit.register(release_instance_lock)
-
-    def _handle_signal(signum, _frame):
-        print(f"[lock] Received signal {signum}, releasing lock and exiting...")
-        release_instance_lock()
-        sys.exit(128 + signum if signum < 128 else 1)
-
-    for sig_name in ("SIGTERM", "SIGINT"):
-        try:
-            sig = getattr(signal, sig_name)
-            signal.signal(sig, _handle_signal)
-        except (AttributeError, ValueError):
-            pass
-
-
-def release_instance_lock():
-    lock = _get_lock_path()
-    try:
-        if lock.exists():
-            lock.unlink()
-            print(f"[lock] Released {lock}")
-    except Exception as e:
-        print(f"[lock] Warning: could not remove lockfile: {e}")
-
-
-def build_env_from_globals():
-    return {
-        "TZ": os.getenv("TZ", "UTC"),
-        "TIME_1": time1 or "",
-        "TIME_2": time2 or "",
-        "TIME_3": time3 or "",
-        "INTERVAL": snapshotMinuteInterval or "",
-        "TIMELAPSE_LENGTH_SECONDS": timelapseLengthSecondsRaw,
-        "TIMELAPSE_QUALITY": timelapseQuality,
-        "RETRY_MAX_SECONDS": retryMaxSecondsRaw,
-        "RETRY_DELAY_SECONDS": retryDelaySecondsRaw,
-    }
-
-
-def runtime_snapshot():
-    return {
-        "TIME_1": time1,
-        "TIME_2": time2,
-        "TIME_3": time3,
-        "INTERVAL": snapshotMinuteInterval,
-        "TIMELAPSE_LENGTH_SECONDS": timelapseLengthSeconds,
-        "TIMELAPSE_QUALITY": timelapseQuality,
-    }
-
-
-def parse_numeric_settings():
-    global timelapseLengthSeconds, retryMaxSeconds, retryDelaySeconds
-
-    parsed_timelapse_length = parse_int_setting(
-        "TIMELAPSE_LENGTH_SECONDS",
-        timelapseLengthSecondsRaw,
-        minimum=0,
-        exclusive_minimum=True,
-    )
-    parsed_retry_max = parse_int_setting(
-        "RETRY_MAX_SECONDS",
-        retryMaxSecondsRaw,
-        minimum=0,
-    )
-    parsed_retry_delay = parse_int_setting(
-        "RETRY_DELAY_SECONDS",
-        retryDelaySecondsRaw,
-        minimum=0,
-        exclusive_minimum=True,
-    )
-
-    if any(value is None for value in (parsed_timelapse_length, parsed_retry_max, parsed_retry_delay)):
-        return False
-
-    timelapseLengthSeconds = parsed_timelapse_length
-    retryMaxSeconds = parsed_retry_max
-    retryDelaySeconds = parsed_retry_delay
-    return True
-
-
-def apply_env_values_to_runtime(env_values):
-    global time1, time2, time3, snapshotMinuteInterval
-    global timelapseLengthSecondsRaw, timelapseQuality
-
-    time1 = env_values.get("TIME_1", "")
-    time2 = env_values.get("TIME_2", "")
-    time3 = env_values.get("TIME_3", "")
-    snapshotMinuteInterval = env_values.get("INTERVAL", "")
-    timelapseLengthSecondsRaw = env_values.get("TIMELAPSE_LENGTH_SECONDS", "10")
-    timelapseQuality = env_values.get("TIMELAPSE_QUALITY", "medium")
-
-    tz = env_values.get("TZ")
-    if tz:
-        os.environ["TZ"] = tz
-        if hasattr(time, "tzset"):
-            time.tzset()
-
-    return parse_numeric_settings()
-
-
-def reschedule_jobs():
-    schedule.clear()
-
-    if time1:
-        schedule.every().day.at(time1).do(trigger)
-    if time2:
-        schedule.every().day.at(time2).do(trigger)
-    if time3:
-        schedule.every().day.at(time3).do(trigger)
-    if snapshotMinuteInterval:
-        minutes = int(snapshotMinuteInterval)
-        if minutes > 0:
-            schedule.every(minutes).minutes.do(trigger)
-
-    if settings_sync.enabled:
-        schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(sync_from_api)
-
-
-settings_sync = SettingsSync(
-    ENV_PATH,
-    API_URL,
-    API_TOKEN,
-    pause_gate,
-    apply_env_values_to_runtime,
-    reschedule_jobs,
-)
-
-
-def sync_from_api():
-    settings_sync.sync(runtime_snapshot)
-
-
-# Sends new snapshots to Webhook
-def webhook(file_path, message="New snapshot!"):
-    if not webHookURL:
+def webhook(file_path: str, webhook_url: str, message: str = "New snapshot!") -> bool:
+    if not webhook_url:
         print("WH_URL is not set, skipping upload.")
         return False
 
@@ -242,92 +62,52 @@ def webhook(file_path, message="New snapshot!"):
 
     try:
         with open(file_path, "rb") as file:
-            files = {
-                "file": (os.path.basename(file_path), file)
-            }
-
-            data = {
-                "content": message
-            }
-
+            files = {"file": (os.path.basename(file_path), file)}
+            data = {"content": message}
             response = requests.post(
-                webHookURL,
+                webhook_url,
                 data=data,
                 files=files,
-                timeout=30
+                timeout=30,
             )
 
-        if response.status_code in [200, 204]:
+        if response.status_code in (200, 204):
             print(f"Webhook snapshot uploaded: {file_path}.")
             return True
-        else:
-            print(f"Webhook request failed: {response.status_code}")
-            print(response.text)
-            return False
 
+        print(f"Webhook request failed: {response.status_code}")
+        print(response.text)
+        return False
     except Exception as e:
         print("Upload error:")
         print(e)
         return False
 
-
-def validate_inputs():
-    if not rtsp_url:
-        print("RTSP_STREAM is required")
-        return False
-
-    if not validate_env_values(build_env_from_globals()):
-        return False
-
-    return parse_numeric_settings()
-
-
-if "--validate" in sys.argv:
-    print("input valid:", validate_inputs())
-    sys.exit(0)
-
-# Acquire lockfile so only one instance of the script can run at a time.
-if os.getenv("SKIP_LOCK", "0").lower() not in ("1", "true", "yes"):
-    acquire_instance_lock()
-
-# Translate quality setting to ffmpeg CRF value
-def get_quality():
-    if timelapseQuality == "low":
-        return "28"
-    elif timelapseQuality == "medium":
-        return "23"
-    elif timelapseQuality == "high":
-        return "18"
-    else:
-        return "23"
-
-# Generates filename
-def create_filename():
-    os.makedirs(snapshotDir, exist_ok=True)
-
+def create_filename(snapshot_dir: str) -> str:
+    os.makedirs(snapshot_dir, exist_ok=True)
     existing = []
-    for name in os.listdir(snapshotDir):
-        if name.lower().endswith(".webp"):
-            base = os.path.splitext(name)[0]
-            if base.isdigit():
-                existing.append(int(base))
-
+    for name in list_numeric_webps(snapshot_dir):
+        base = os.path.splitext(name)[0]
+        existing.append(int(base))
     next_number = max(existing, default=0) + 1
-    return os.path.join(snapshotDir, f"{next_number:04d}.webp")
+    return os.path.join(snapshot_dir, f"{next_number:04d}.webp")
 
-# Tries to grab one snapshot from the RTSP source
-def grab_snapshot():
+def grab_snapshot(rtsp_url: str, snapshot_dir: str):
     print("Taking snapshot...")
-    filename = create_filename()
+    filename = create_filename(snapshot_dir)
     print(filename)
 
     cmd = [
         "ffmpeg",
         "-y",
-        "-rtsp_transport", "tcp",
-        "-i", rtsp_url,
-        "-frames:v", "1",
-        "-q:v", "80",
+        "-rtsp_transport",
+        "tcp",
+        "-i",
+        rtsp_url,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "80",
         filename,
     ]
 
@@ -337,7 +117,7 @@ def grab_snapshot():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             timeout=60,
-            text=True
+            text=True,
         )
     except subprocess.TimeoutExpired as e:
         print("ERROR: snapshot attempt timed out")
@@ -350,78 +130,65 @@ def grab_snapshot():
     if result.returncode == 0:
         print(f"File saved: {filename}")
         return filename
-    else:
-        print("ERROR: ")
-        print(result.stderr)
-        if os.path.exists(filename):
-            os.remove(filename)
-        return False
 
-# Grabs snapshot or waits if camera is not reachable
-def save_snapshot():
-    deadline = time.monotonic() + retryMaxSeconds
+    print("ERROR: ")
+    print(result.stderr)
+    if os.path.exists(filename):
+        os.remove(filename)
+    return False
+
+def save_snapshot(state: RuntimeState):
+    cfg = state.config
+    deadline = time.monotonic() + cfg.retry_max_seconds
 
     while True:
-        snapshot = grab_snapshot()
+        snapshot = grab_snapshot(cfg.rtsp_url, cfg.snapshot_dir)
         if snapshot:
             return snapshot
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            print(f"Could not take snapshot within {retryMaxSeconds} seconds - Giving up.")
+            print(
+                f"Could not take snapshot within {cfg.retry_max_seconds} seconds - Giving up."
+            )
             return False
 
-        wait_seconds = min(retryDelaySeconds, remaining)
+        wait_seconds = min(cfg.retry_delay_seconds, remaining)
         print(f"Camera unavailable. Retrying in {int(wait_seconds)} seconds...")
         time.sleep(wait_seconds)
 
-if "--snapshot" in sys.argv:
-    if not parse_numeric_settings():
-        sys.exit(1)
-    if not rtsp_url:
-        print("RTSP_STREAM is required")
-        sys.exit(1)
-    save_snapshot()
-    sys.exit(0)
-
-# Renders timelapse from all NUMERIC.webp files in ./snapshots
-def create_timelapse():
+def create_timelapse(state: RuntimeState) -> bool:
+    cfg = state.config
     print("Creating timelapse...")
-    os.makedirs(timelapseDir, exist_ok=True)
+    os.makedirs(cfg.timelapse_dir, exist_ok=True)
 
-    image_files = []
-    for name in os.listdir(snapshotDir):
-        if name.lower().endswith(".webp"):
-            base = os.path.splitext(name)[0]
-            if base.isdigit():
-                image_files.append(name)
-
-    image_files.sort()
-
+    image_files = list_numeric_webps(cfg.snapshot_dir)
     if not image_files:
         print("No images found.")
         return False
 
     image_count = len(image_files)
-    fps = max(1, math.ceil(image_count / timelapseLengthSeconds))
-
-    output_file = os.path.join(
-        timelapseDir,
-        "latest_timelapse.mp4"
-    )
-
-    input_pattern = os.path.join(snapshotDir, "%04d.webp")
+    fps = max(1, math.ceil(image_count / cfg.timelapse_length_seconds))
+    output_file = os.path.join(cfg.timelapse_dir, "latest_timelapse.mp4")
+    input_pattern = os.path.join(cfg.snapshot_dir, "%04d.webp")
 
     cmd = [
         "ffmpeg",
         "-y",
-        "-framerate", str(fps),
-        "-i", input_pattern,
-        "-c:v", "libx264",
-        "-crf", get_quality(),
-        "-preset", "slow",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
+        "-framerate",
+        str(fps),
+        "-i",
+        input_pattern,
+        "-c:v",
+        "libx264",
+        "-crf",
+        cfg.quality_crf(),
+        "-preset",
+        "slow",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
         output_file,
     ]
 
@@ -431,77 +198,179 @@ def create_timelapse():
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
 
     if result.returncode == 0:
         print(f"Timelapse saved: {output_file}")
         return True
-    else:
-        print("ERROR: ")
-        print(result.stderr)
-        return False
 
-if "--render" in sys.argv:
-    if not parse_numeric_settings():
-        sys.exit(1)
-    create_timelapse()
-    sys.exit(0)
+    print("ERROR: ")
+    print(result.stderr)
+    return False
 
-# Runs snapshot and (if successful) timelapse
-def trigger():
-    if not pause_gate.should_run_trigger():
+def trigger(state: RuntimeState):
+    if not should_run_trigger(state):
         print(
-            f"Paused - skipping snapshot at "
+            "Paused - skipping snapshot at "
             f"{datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}"
         )
         return
 
-    print(f"Trigger has been executed at {datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}")
-    success = save_snapshot()
+    print(
+        "Trigger has been executed at "
+        f"{datetime.datetime.now().strftime('%d - %m - %Y // %H : %M')}"
+    )
+    success = save_snapshot(state)
     if success:
-        webhook(success, datetime.datetime.now().strftime("%d - %m - %Y // %H : %M"))
-        create_timelapse()
+        webhook(
+            success,
+            state.config.webhook_url,
+            datetime.datetime.now().strftime("%d - %m - %Y // %H : %M"),
+        )
+        create_timelapse(state)
 
-# Prints configuration
-def welcome():
+def welcome(state: RuntimeState, settings_sync: SettingsSync) -> None:
+    cfg = state.config
     print("Configuration looks good!")
     print("GrowCast Timelapse started!")
     print("---------------------------")
-    if time1 or time2 or time3:
-        print(f"Times set: {time1} {time2} {time3}")
-    if snapshotMinuteInterval and str(snapshotMinuteInterval).strip() not in ("", "-"):
-        print(f"Snapshot interval: {snapshotMinuteInterval} minutes")
+    if cfg.time1 or cfg.time2 or cfg.time3:
+        print(f"Times set: {cfg.time1} {cfg.time2} {cfg.time3}")
+    interval = (cfg.interval or "").strip()
+    if interval and interval != "-":
+        print(f"Snapshot interval: {interval} minutes")
     else:
         print("Snapshot interval: (using fixed TIME_* only)")
-    print(f"Snapshot directory: {snapshotDir}")
+    print(f"Snapshot directory: {cfg.snapshot_dir}")
     print("---------------------------")
-    print(f"Timelapse directory: {timelapseDir}")
-    print(f"Timelapse length: {timelapseLengthSeconds} seconds")
-    print(f"Timelapse quality: {timelapseQuality}")
+    print(f"Timelapse directory: {cfg.timelapse_dir}")
+    print(f"Timelapse length: {cfg.timelapse_length_seconds} seconds")
+    print(f"Timelapse quality: {cfg.timelapse_quality}")
     print("---------------------------")
     if settings_sync.enabled:
-        print(f"API sync: enabled ({API_URL}, every {SYNC_INTERVAL_MINUTES} min)")
-        print(f"Paused: {pause_gate.paused}")
+        print(
+            f"API sync: enabled ({cfg.api_url}, every {SYNC_INTERVAL_MINUTES} min)"
+        )
+        print(f"Paused: {state.paused}")
     else:
         print("API sync: disabled")
     print("---------------------------")
 
-if "--test" in sys.argv:
-    if not validate_inputs():
+def print_errors(errors: list[str]) -> None:
+    for err in errors:
+        print(err)
+
+def reschedule_jobs(state: RuntimeState, settings_sync: SettingsSync) -> None:
+    schedule.clear()
+    cfg = state.config
+
+    if cfg.time1:
+        schedule.every().day.at(cfg.time1).do(trigger, state)
+    if cfg.time2:
+        schedule.every().day.at(cfg.time2).do(trigger, state)
+    if cfg.time3:
+        schedule.every().day.at(cfg.time3).do(trigger, state)
+
+    minutes = cfg.interval_minutes()
+    if minutes is not None and minutes > 0:
+        schedule.every(minutes).minutes.do(trigger, state)
+
+    if settings_sync.enabled:
+        schedule.every(SYNC_INTERVAL_MINUTES).minutes.do(settings_sync.sync)
+
+def run_daemon(state: RuntimeState, settings_sync: SettingsSync) -> None:
+    if settings_sync.enabled:
+        settings_sync.sync()
+
+    errors = config_validation_errors(state.config, require_rtsp=True)
+    if errors:
+        print_errors(errors)
         raise ValueError("Invalid .env configuration")
-    trigger()
-    sys.exit(0)
 
-if settings_sync.enabled:
-    sync_from_api()
+    welcome(state, settings_sync)
+    reschedule_jobs(state, settings_sync)
 
-if not validate_inputs():
-    raise ValueError("Invalid .env configuration")
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
-welcome()
-reschedule_jobs()
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    mode = detect_mode(argv)
 
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+    load_dotenv(ENV_PATH)
+    config, errors = load_config_from_environ()
+
+    if mode == "validate":
+        if errors:
+            print_errors(errors)
+        print("input valid:", len(errors) == 0)
+        return 0
+
+    state = RuntimeState(config=config)
+
+    settings_sync: SettingsSync
+
+    def on_reschedule() -> None:
+        reschedule_jobs(state, settings_sync)
+
+    settings_sync = SettingsSync(ENV_PATH, state, on_reschedule=on_reschedule)
+
+    if mode == "snapshot":
+        if not config.rtsp_url:
+            print("RTSP_STREAM is required")
+            return 1
+        if any("TIMELAPSE_LENGTH" in e or "RETRY_" in e for e in errors):
+            numeric_errors = [
+                e
+                for e in errors
+                if e.startswith("RETRY_") or e.startswith("TIMELAPSE_LENGTH")
+            ]
+            if numeric_errors:
+                print_errors(numeric_errors)
+                return 1
+    elif mode == "render":
+        length_errors = [e for e in errors if e.startswith("TIMELAPSE_")]
+        if length_errors:
+            print_errors(length_errors)
+            return 1
+    elif mode == "test":
+        if errors:
+            print_errors(errors)
+            raise ValueError("Invalid .env configuration")
+
+    skip_lock = os.getenv("SKIP_LOCK", "0").lower() in ("1", "true", "yes")
+    if not skip_lock:
+        lock_path = resolve_lock_path(config.snapshot_dir, os.getenv("LOCK_FILE"))
+        try:
+            acquired = acquire_instance_lock(lock_path)
+            print(f"[lock] Acquired lock {acquired} (PID {os.getpid()})")
+        except LockHeldError as e:
+            print(f"ERROR: {e}")
+            print(f"Lock file: {e.lock_path}")
+            print("If the old instance crashed, delete the lockfile manually,")
+            print("or start with SKIP_LOCK=1 (not recommended for normal use).")
+            return 1
+
+    if mode == "snapshot":
+        save_snapshot(state)
+        return 0
+
+    if mode == "render":
+        create_timelapse(state)
+        return 0
+
+    if mode == "test":
+        trigger(state)
+        return 0
+
+    run_daemon(state, settings_sync)
+    return 0
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        release_instance_lock()
+        raise
