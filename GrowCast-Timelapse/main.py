@@ -280,6 +280,11 @@ def create_timelapse():
         timelapseDir,
         "latest_timelapse.mp4"
     )
+    
+    temp_file = os.path.join(
+        timelapseDir,
+        "latest_timelapse.partial.mp4"
+    )
 
     input_pattern = os.path.join(snapshotDir, "%04d.webp")
 
@@ -293,7 +298,7 @@ def create_timelapse():
         "-preset", "slow",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        output_file,
+        temp_file,
     ]
 
     print(f"Creating timelapse, found {image_count} images, {fps} fps ...")
@@ -306,11 +311,14 @@ def create_timelapse():
     )
 
     if result.returncode == 0:
+        os.replace(temp_file, output_file)
         print(f"Timelapse saved: {output_file}")
         return True
     else:
         print("ERROR: ")
         print(result.stderr)
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
         return False
 
 if "--render" in sys.argv:
