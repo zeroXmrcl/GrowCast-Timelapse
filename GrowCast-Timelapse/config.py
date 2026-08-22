@@ -10,8 +10,8 @@ from typing import Any, Mapping
 QUALITY_VALUES = ("low", "medium", "high")
 QUALITY_CRF = {
     "low": "28",
-    "medium": "23",
-    "high": "18",
+    "medium": "26",
+    "high": "23",
 }
 
 def parse_int_setting(

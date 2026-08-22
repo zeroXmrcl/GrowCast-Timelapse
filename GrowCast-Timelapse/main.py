@@ -39,6 +39,9 @@ def detect_mode(argv: list[str]) -> str:
         return "test"
     return "daemon"
 
+TIMELAPSE_VF = "hqdn3d=2.5:1.5:4:4,scale=-2:'min(1080,ih)':flags=lanczos"
+
+
 def list_numeric_webps(directory: str) -> list[str]:
     names: list[str] = []
     if not os.path.isdir(directory):
@@ -50,6 +53,63 @@ def list_numeric_webps(directory: str) -> list[str]:
                 names.append(name)
     names.sort()
     return names
+
+
+def concat_file_entry(path: str) -> str:
+    resolved = os.path.abspath(path).replace("\\", "/")
+    escaped = resolved.replace("'", r"'\''")
+    return f"file '{escaped}'"
+
+
+def write_concat_file(image_files: list[str], snapshot_dir: str, concat_path: str) -> None:
+    lines = ["ffconcat version 1.0\n"]
+    for name in image_files:
+        lines.append(concat_file_entry(os.path.join(snapshot_dir, name)) + "\n")
+    with open(concat_path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+
+
+def build_timelapse_cmd(fps: int, concat_path: str, crf: str, temp_file: str) -> list[str]:
+    return [
+        "ffmpeg",
+        "-y",
+        "-nostdin",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-r",
+        str(fps),
+        "-i",
+        concat_path,
+        "-an",
+        "-map_metadata",
+        "-1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "slow",
+        "-crf",
+        crf,
+        "-maxrate",
+        "10M",
+        "-bufsize",
+        "20M",
+        "-profile:v",
+        "high",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-vf",
+        TIMELAPSE_VF,
+        temp_file,
+    ]
+
+
+def _unlink_if_exists(path: str) -> None:
+    if os.path.exists(path):
+        os.remove(path)
 
 def webhook(file_path: str, webhook_url: str, message: str = "New snapshot!") -> bool:
     if not webhook_url:
@@ -174,27 +234,9 @@ def create_timelapse(state: RuntimeState) -> bool:
     # MP4 (moves moov to the start). Overwriting the published path in place
     # can leave two moov atoms and a truncated mdat that browsers cannot play.
     temp_file = os.path.join(cfg.timelapse_dir, "latest_timelapse.partial.mp4")
-    input_pattern = os.path.join(cfg.snapshot_dir, "%04d.webp")
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-framerate",
-        str(fps),
-        "-i",
-        input_pattern,
-        "-c:v",
-        "libx264",
-        "-crf",
-        cfg.quality_crf(),
-        "-preset",
-        "slow",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        temp_file,
-    ]
+    concat_path = os.path.join(cfg.timelapse_dir, "latest_timelapse.concat.txt")
+    write_concat_file(image_files, cfg.snapshot_dir, concat_path)
+    cmd = build_timelapse_cmd(fps, concat_path, cfg.quality_crf(), temp_file)
 
     print(f"Creating timelapse, found {image_count} images, {fps} fps ...")
 
@@ -207,13 +249,14 @@ def create_timelapse(state: RuntimeState) -> bool:
 
     if result.returncode == 0:
         os.replace(temp_file, output_file)
+        _unlink_if_exists(concat_path)
         print(f"Timelapse saved: {output_file}")
         return True
 
     print("ERROR: ")
     print(result.stderr)
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
+    _unlink_if_exists(temp_file)
+    _unlink_if_exists(concat_path)
     return False
 
 def trigger(state: RuntimeState):
